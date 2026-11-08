@@ -1,0 +1,105 @@
+name: Akeju security pipeline
+# Created by Adekunle Akeju. Secret scanning, dependency checks and static analysis in one summary.
+on:
+  workflow_call:
+    inputs:
+      path:
+        description: Folder to scan, relative to the repository root
+        type: string
+        default: "."
+      exclude:
+        description: Space-separated relative paths to leave out of the scan
+        type: string
+        default: ""
+      scan-history:
+        description: Also search earlier commits for secrets
+        type: boolean
+        default: true
+      fail-on-findings:
+        description: Fail the job when anything is found
+        type: boolean
+        default: true
+      pipeline-ref:
+        description: Version of this pipeline's scripts to use
+        type: string
+        default: main
+    outputs:
+      findings:
+        description: Total number of findings
+        value: ${{ jobs.scan.outputs.findings }}
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    outputs:
+      findings: ${{ steps.summary.outputs.findings }}
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+      OSV_VERSION: 2.7.0
+      OSV_SHA256: 160c6253e2922e9e0a6a9771c5c4c40a4b3c6090b34a3cdd5e80c96cc2e4218b
+      SEMGREP_VERSION: 1.184.0
+      SCAN_PATH: ${{ inputs.path }}
+      EXCLUDE: ${{ inputs.exclude }}
+      REPORTS: ${{ runner.temp }}/reports
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: thiskunle/akeju-security-pipeline
+          ref: ${{ inputs.pipeline-ref }}
+          path: .akeju-pipeline
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Install scanners, verifying each download
+        run: |
+          mkdir -p "$REPORTS" "$RUNNER_TEMP/bin"
+          cd "$RUNNER_TEMP"
+          curl -fsSLo gitleaks.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tgz" | sha256sum -c -
+          tar -xzf gitleaks.tgz -C bin gitleaks
+          curl -fsSLo bin/osv-scanner "https://github.com/google/osv-scanner/releases/download/v${OSV_VERSION}/osv-scanner_linux_amd64"
+          echo "${OSV_SHA256}  bin/osv-scanner" | sha256sum -c -
+          chmod +x bin/osv-scanner
+          pip install --quiet "semgrep==${SEMGREP_VERSION}"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Prepare scan folder
+        run: |
+          mv .akeju-pipeline "$RUNNER_TEMP/pipeline"
+          for item in $EXCLUDE; do
+            case "$item" in /*|*..*) echo "::error::Exclude paths must be relative: $item"; exit 2;; esac
+            rm -rf -- "$item"
+          done
+      - name: Secrets
+        run: |
+          gitleaks dir "$SCAN_PATH" --redact --no-banner --exit-code 0 --report-format json --report-path "$REPORTS/gitleaks.json"
+      - name: Secrets in history
+        if: inputs.scan-history
+        run: |
+          gitleaks git . --redact --no-banner --exit-code 0 --report-format json --report-path "$REPORTS/gitleaks-history.json"
+      - name: Dependencies
+        run: |
+          code=0
+          osv-scanner scan source -r "$SCAN_PATH" --format json --output-file "$REPORTS/osv.json" || code=$?
+          # 1 means vulnerabilities were found. 128 means there were no packages to scan.
+          if [ "$code" = 128 ]; then echo '{"results":[]}' > "$REPORTS/osv.json"
+          elif [ "$code" != 0 ] && [ "$code" != 1 ]; then exit "$code"; fi
+      - name: Static analysis
+        run: |
+          semgrep scan "$SCAN_PATH" --config p/owasp-top-ten --config p/secure-defaults --metrics off --json --output "$REPORTS/semgrep.json" --no-git-ignore
+      - name: Summary
+        id: summary
+        env:
+          FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
+        run: |
+          flag=""
+          [ "$FAIL_ON_FINDINGS" = "true" ] && flag="--fail-on-findings"
+          python "$RUNNER_TEMP/pipeline/scripts/summarize.py" --reports "$REPORTS" $flag
