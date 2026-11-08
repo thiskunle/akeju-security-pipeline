@@ -44,7 +44,6 @@ jobs:
       SEMGREP_VERSION: 1.184.0
       SCAN_PATH: ${{ inputs.path }}
       EXCLUDE: ${{ inputs.exclude }}
-      REPORTS: ${{ runner.temp }}/reports
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -61,6 +60,8 @@ jobs:
           python-version: "3.12"
       - name: Install scanners, verifying each download
         run: |
+          REPORTS="$RUNNER_TEMP/reports"
+          echo "REPORTS=$REPORTS" >> "$GITHUB_ENV"
           mkdir -p "$REPORTS" "$RUNNER_TEMP/bin"
           cd "$RUNNER_TEMP"
           curl -fsSLo gitleaks.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
